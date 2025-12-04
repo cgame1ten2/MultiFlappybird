@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Flocky Birds: Multiplayer</title>
+    
+    <!-- 1. Libraries -->
+    <!-- p5.js for Rendering and Logic -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/p5.min.js"></script>
+    <!-- PeerJS for WebRTC Multiplayer (No Backend Required) -->
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <!-- Google Font for Arcade Feel -->
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+
+    <style>
+        /* 2. CSS Styling */
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #333;
+            font-family: 'Press Start 2P', cursive;
+            overflow: hidden; /* Prevent scrolling on mobile */
+            touch-action: manipulation; /* Improves touch response */
+        }
+
+        #game-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #222;
+        }
+
+        /* UI Overlays */
+        .overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background: rgba(0,0,0,0.85);
+            color: white;
+            z-index: 10;
+            text-align: center;
+        }
+
+        .hidden { display: none !important; }
+
+        h1 { font-size: 24px; color: #f4d03f; text-shadow: 4px 4px #000; margin-bottom: 30px; }
+        p { font-size: 12px; line-height: 1.8; color: #ccc; max-width: 600px; margin: 10px 20px; }
+        
+        button {
+            background: #e74c3c;
+            border: 4px solid #c0392b;
+            color: white;
+            padding: 15px 30px;
+            font-family: 'Press Start 2P', cursive;
+            font-size: 16px;
+            cursor: pointer;
+            margin: 10px;
+            text-transform: uppercase;
+        }
+        button:hover { background: #ff5e4d; margin-top: 8px; margin-bottom: 12px; }
+        button:active { background: #c0392b; }
+
+        input {
+            padding: 15px;
+            font-family: 'Press Start 2P', cursive;
+            text-align: center;
+            font-size: 14px;
+            border: 4px solid #fff;
+            background: #000;
+            color: #fff;
+            width: 250px;
+            margin-bottom: 20px;
+            text-transform: uppercase;
+        }
+
+        /* Mobile Controller Specific Styles */
+        #mobile-controller {
+            background-color: #4ec0ca;
+            width: 100%; height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #flap-btn {
+            width: 80vw;
+            height: 60vh;
+            background: #f1c40f;
+            border: 8px solid #f39c12;
+            border-radius: 20px;
+            font-size: 24px;
+            color: #d35400;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+        }
+        #flap-btn:active { background: #fff; transform: scale(0.98); }
+
+        .player-chip {
+            display: inline-block;
+            padding: 5px 10px;
+            margin: 5px;
+            border: 2px solid white;
+            font-size: 10px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- MAIN MENU -->
+    <div id="menu-screen" class="overlay">
+        <h1>FLOCKY BIRDS</h1>
+        <p>A Multiplayer Experiment</p>
+        <br>
+        <button onclick="startHost()">HOST GAME (Desktop)</button>
+        <button onclick="showJoinScreen()">JOIN GAME (Mobile)</button>
+    </div>
+
+    <!-- JOIN SCREEN (Mobile) -->
+    <div id="join-screen" class="overlay hidden">
+        <h1>CONNECT TO HOST</h1>
+        <p>Enter the 4-character ID shown on the Host screen:</p>
+        <input type="text" id="host-id-input" placeholder="ABCD" maxlength="4">
+        <button onclick="connectToHost()">CONNECT</button>
+        <br>
+        <button style="background: #555; border-color: #333; font-size: 10px;" onclick="location.reload()">BACK</button>
+    </div>
+
+    <!-- LOBBY SCREEN (Host) -->
+    <div id="lobby-screen" class="overlay hidden">
+        <h1>LOBBY</h1>
+        <p>Game ID:</p>
+        <h2 id="display-id" style="font-size: 40px; color: #4ec0ca; background: #fff; padding: 10px; color: #333;">...</h2>
+        <p>Assign Keys or Join via Mobile</p>
+        
+        <div id="player-list" style="margin: 20px; min-height: 50px;">
+            <!-- Players appear here -->
+        </div>
+
+        <div style="background: #444; padding: 10px; border-radius: 5px;">
+            <p>To add local player: Press any Key</p>
+            <p>To add mobile player: Enter ID on phone</p>
+        </div>
+        <br>
+        <button onclick="startGame()">START GAME</button>
+    </div>
+
+    <!-- MOBILE CONTROLLER UI -->
+    <div id="mobile-ui" class="overlay hidden">
+        <div id="mobile-controller">
+            <h2 style="color: white; text-shadow: 2px 2px #000;">TAP TO FLAP</h2>
+            <div id="mobile-status" style="margin-bottom: 20px; font-size: 10px;">Connected!</div>
+            <button id="flap-btn" ontouchstart="sendJump()" onmousedown="sendJump()">FLAP!</button>
+        </div>
+    </div>
+
+    <!-- GAME OVER SCREEN -->
+    <div id="game-over-screen" class="overlay hidden">
+        <h1 style="color: #e74c3c;">GAME OVER</h1>
+        <p id="winner-text">Winner: None</p>
+        <button onclick="resetGame()">PLAY AGAIN</button>
+        <button onclick="location.reload()">MAIN MENU</button>
+    </div>
+
+    <!-- GAME CANVAS CONTAINER -->
+    <div id="game-container"></div>
+
+    <script>
+        /**
+         * GLOBAL CONFIG & STATE
+         */
+        const DEBUG = false;
+        let MODE = 'MENU'; // MENU, HOST, CONTROLLER
+        let GAME_STATE = 'LOBBY'; // LOBBY, PLAY, GAMEOVER
+        
+        // PeerJS Networking
+        let peer;
+        let conn; // For controller
+        let connections = []; // For host (list of connected phones)
+        
+        // Game Objects
+        let birds = [];
+        let pipes = [];
+        let score = 0;
+        let groundX = 0;
+        let bgX = 0;
+        let frameCountInternal = 0;
+
+        // Assets (Procedural for single file)
+        const COLORS = [
+            '#e74c3c', // Red
+            '#3498db', // Blue
+            '#2ecc71', // Green
+            '#f1c40f', // Yellow
+            '#9b59b6', // Purple
+            '#e67e22'  // Orange
+        ];
+
+        // Unique ID Generator (Short 4-char ID for ease of typing)
+        function generateShortID() {
+            const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No I, O, 0, 1 to avoid confusion
+            let result = '';
+            for (let i = 0; i < 4; i++) {
+                result += chars.charAt(Math.floor(Math.random() * chars.length));
+            }
+            return result;
+        }
+
+        /**
+         * ------------------------------------------------------------------
+         * NETWORKING LOGIC (PEERJS)
+         * ------------------------------------------------------------------
+         */
+
+        // 1. HOST LOGIC
+        function startHost() {
+            MODE = 'HOST';
+            document.getElementById('menu-screen').classList.add('hidden');
+            document.getElementById('lobby-screen').classList.remove('hidden');
+
+            const shortID = generateShortID();
+            document.getElementById('display-id').innerText = shortID;
+
+            // Initialize PeerJS
+            // We prepend a prefix to make the ID globally unique on the PeerServer cloud
+            peer = new Peer('flocky-' + shortID);
+
+            peer.on('open', (id) => {
+                console.log('Host initialized with ID:', id);
+            });
+
+            peer.on('connection', (c) => {
+                // Handle incoming mobile connection
+                c.on('open', () => {
+                    console.log("Mobile connected");
+                    addPlayer('mobile', null, c);
+                });
+
+                c.on('data', (data) => {
+                    if (data.type === 'JUMP') {
+                        handleJumpSignal(c.peer);
+                    }
+                });
+            });
+
+            // Start p5 sketch
+            new p5(sketch, 'game-container');
+        }
+
+        // 2. CONTROLLER LOGIC
+        function showJoinScreen() {
+            document.getElementById('menu-screen').classList.add('hidden');
+            document.getElementById('join-screen').classList.remove('hidden');
+        }
+
+        function connectToHost() {
+            const inputVal = document.getElementById('host-id-input').value.toUpperCase().trim();
+            if (inputVal.length < 4) { alert("Please enter 4 characters"); return; }
+
+            MODE = 'CONTROLLER';
+            document.getElementById('join-screen').classList.add('hidden');
+            document.getElementById('mobile-ui').classList.remove('hidden');
+
+            peer = new Peer(); // Let server assign random ID for controller
+
+            peer.on('open', (id) => {
+                const connId = 'flocky-' + inputVal;
+                conn = peer.connect(connId);
+
+                conn.on('open', () => {
+                    document.getElementById('mobile-status').innerText = "CONNECTED TO " + inputVal;
+                    document.getElementById('mobile-status').style.color = "#2ecc71";
+                });
+
+                conn.on('error', (err) => {
+                    alert("Connection Failed. Check ID.");
+                    location.reload();
+                });
+            });
+        }
+
+        function sendJump() {
+            if (conn && conn.open) {
+                conn.send({ type: 'JUMP' });
+            }
+        }
+
+
+        /**
+         * ------------------------------------------------------------------
+         * GAME LOGIC & P5.JS SKETCH
+         * ------------------------------------------------------------------
+         */
+        
+        // Player Management
+        function addPlayer(type, key, connection) {
+            // Check if player already exists
+            if (type === 'keyboard' && birds.find(b => b.controlType === 'keyboard' && b.controlKey === key)) return;
+            if (type === 'mobile' && birds.find(b => b.controlType === 'mobile' && b.connId === connection.peer)) return;
+
+            const id = birds.length + 1;
+            const color = COLORS[birds.length % COLORS.length];
+            
+            const newBird = new Bird(id, color, type, key, connection ? connection.peer : null);
+            birds.push(newBird);
+            
+            updateLobbyUI();
+        }
+
+        function updateLobbyUI() {
+            const list = document.getElementById('player-list');
+            list.innerHTML = '';
+            birds.forEach(b => {
+                const chip = document.createElement('div');
+                chip.className = 'player-chip';
+                chip.style.background = b.color;
+                chip.innerText = b.controlType === 'keyboard' ? `Key: ${b.controlKey}` : `Mobile P${b.id}`;
+                list.appendChild(chip);
+            });
+        }
+
+        function handleJumpSignal(peerId) {
+            if (GAME_STATE !== 'PLAY') return;
+            const bird = birds.find(b => b.connId === peerId);
+            if (bird && !bird.dead) bird.flap();
+        }
+
+        function startGame() {
+            if (birds.length === 0) {
+                alert("Need at least 1 player!");
+                return;
+            }
+            GAME_STATE = 'PLAY';
+            document.getElementById('lobby-screen').classList.add('hidden');
+            resetWorld();
+        }
+
+        function resetGame() {
+            GAME_STATE = 'PLAY';
+            document.getElementById('game-over-screen').classList.add('hidden');
+            resetWorld();
+        }
+
+        function resetWorld() {
+            birds.forEach(b => b.reset());
+            pipes = [];
+            score = 0;
+            frameCountInternal = 0;
+            pipes.push(new Pipe(width + 100)); // First pipe
+        }
+
+
+        /**
+         * P5.JS INSTANCE
+         */
+        const sketch = (p) => {
+
+            // Assets (Drawing simple graphics to avoid external image loading issues)
+            let bgImg, groundImg;
+
+            p.setup = () => {
+                // Aspect Ratio 9:16 approx (Vertical feels better for Flappy Bird, but we do landscape for multiplayer visibility)
+                // Let's do a wide screen to accommodate multiple birds
+                const canvas = p.createCanvas(800, 600);
+                p.noSmooth(); // Pixel art look
+            };
+
+            p.draw = () => {
+                if (MODE !== 'HOST') return; // Only host renders game
+
+                // 1. Draw Background
+                drawBackground(p);
+
+                // 2. State Logic
+                if (GAME_STATE === 'LOBBY') {
+                    // Lobby is HTML overlay, just draw calm background
+                    drawGround(p);
+                } 
+                else if (GAME_STATE === 'PLAY') {
+                    updatePhysics(p);
+                    drawPipes(p);
+                    drawGround(p);
+                    drawBirds(p);
+                    drawUI(p);
+                } 
+                else if (GAME_STATE === 'GAMEOVER') {
+                    drawPipes(p);
+                    drawGround(p);
+                    drawBirds(p); // Static dead birds
+                }
+            };
+
+            p.keyPressed = () => {
+                if (GAME_STATE === 'LOBBY') {
+                    // Assign key to new player
+                    // Ignore common system keys
+                    if (p.keyCode === 13 || p.keyCode === 27 || p.keyCode === 18) return; 
+                    addPlayer('keyboard', p.key.toUpperCase(), null);
+                }
+                else if (GAME_STATE === 'PLAY') {
+                    // Check local players
+                    birds.forEach(b => {
+                        if (b.controlType === 'keyboard' && b.controlKey === p.key.toUpperCase() && !b.dead) {
+                            b.flap();
+                        }
+                    });
+                }
+            };
+        };
+
+        // --- DRAWING HELPERS ---
+
+        function drawBackground(p) {
+            p.background('#70c5ce'); // Classic cyan sky
+            
+            // Cloud parallax (simplified)
+            p.fill(255);
+            p.noStroke();
+            let cloudX = (p.frameCount * 0.5) % p.width;
+            p.rect(p.width - cloudX, p.height - 150, 100, 30);
+            p.rect(p.width - cloudX + 200, p.height - 250, 80, 25);
+            
+            // Cityscape (simplified)
+            p.fill('#a3e063'); // Light green mountains
+            p.rect(0, p.height - 100, p.width, 100);
+            p.fill('#85af50'); // Darker details
+            for(let i=0; i<p.width; i+=50) {
+                p.rect(i, p.height - 100, 48, 100);
+            }
+        }
+
+        function drawGround(p) {
+            p.fill('#ded895'); // Sand color
+            p.stroke('#555');
+            p.strokeWeight(2);
+            p.rect(0, p.height - 40, p.width, 40);
+            
+            // Grass top
+            p.fill('#73bf2e');
+            p.noStroke();
+            p.rect(0, p.height - 40, p.width, 10);
+            p.stroke('#555');
+            p.strokeWeight(2);
+            p.line(0, p.height - 40, p.width, p.height - 40);
+
+            // Moving effect
+            if (GAME_STATE === 'PLAY') {
+                groundX = (groundX + 3) % 20;
+            }
+            for (let i = -20; i < p.width; i+=20) {
+                p.line(i - groundX, p.height - 40, i - groundX - 10, p.height);
+            }
+        }
+
+        function drawBirds(p) {
+            birds.forEach(bird => bird.render(p));
+        }
+
+        function drawPipes(p) {
+            pipes.forEach(pipe => pipe.render(p));
+        }
+
+        function drawUI(p) {
+            // Score
+            p.textAlign(p.CENTER);
+            p.textSize(40);
+            p.stroke(0);
+            p.strokeWeight(4);
+            p.fill(255);
+            p.text(score, p.width / 2, 80);
+        }
+
+        function updatePhysics(p) {
+            // Pipe Spawning
+            frameCountInternal++;
+            if (frameCountInternal % 100 === 0) { // Spawn rate
+                pipes.push(new Pipe(p.width));
+            }
+
+            // Remove offscreen pipes
+            if (pipes.length > 0 && pipes[0].x < -pipes[0].w) {
+                pipes.shift();
+            }
+
+            // Update Pipes
+            pipes.forEach(pipe => pipe.update());
+
+            // Update Birds
+            let activeBirds = 0;
+            birds.forEach(bird => {
+                if (!bird.dead) {
+                    bird.update();
+                    activeBirds++;
+                    
+                    // Collision Check
+                    // 1. Ground/Ceiling
+                    if (bird.y + bird.radius >= p.height - 40 || bird.y - bird.radius <= 0) {
+                        bird.die();
+                    }
+
+                    // 2. Pipes
+                    pipes.forEach(pipe => {
+                        if (bird.checkCollision(pipe)) {
+                            bird.die();
+                        }
+                    });
+                } else {
+                    // Fall to ground if dead
+                    if (bird.y < p.height - 40 - bird.radius) {
+                         bird.velocity += 0.8; // Gravity
+                         bird.y += bird.velocity;
+                    }
+                }
+            });
+
+            // Score Logic (based on first bird passing)
+            // Simpler multiplayer scoring: +1 if any pipe passes center and you are alive
+            pipes.forEach(pipe => {
+                if (!pipe.passed && pipe.x + pipe.w < 100) { // 100 is bird x roughly
+                    score++;
+                    pipe.passed = true;
+                }
+            });
+
+            // Game Over Check
+            if (activeBirds === 0) {
+                endGame();
+            }
+        }
+
+        function endGame() {
+            GAME_STATE = 'GAMEOVER';
+            
+            // Find who lasted longest (simplistic logic)
+            // In a real competitive loop, we'd track frame of death.
+            // Here, everyone is dead, so we just show menu.
+            document.getElementById('game-over-screen').classList.remove('hidden');
+            document.getElementById('winner-text').innerText = "Score: " + score;
+        }
+
+        /**
+         * CLASSES
+         */
+
+        class Bird {
+            constructor(id, color, controlType, controlKey, connId) {
+                this.id = id;
+                this.color = color;
+                this.controlType = controlType;
+                this.controlKey = controlKey;
+                this.connId = connId;
+                
+                this.reset();
+            }
+
+            reset() {
+                this.x = 100;
+                this.y = 300;
+                this.velocity = 0;
+                this.gravity = 0.5; // Heavy gravity feeling
+                this.lift = -8;     // Instant impulse
+                this.radius = 12;   // Visual size (radius)
+                this.dead = false;
+                this.angle = 0;
+            }
+
+            flap() {
+                this.velocity = this.lift;
+                this.angle = -25; // Nose up instantly
+            }
+
+            update() {
+                this.velocity += this.gravity;
+                this.y += this.velocity;
+                
+                // Rotation logic (Arcade style)
+                if (this.velocity < 0) {
+                   // flapped recently
+                   this.angle = -25;
+                } else {
+                    // falling
+                    if (this.angle < 90) {
+                        this.angle += 3;
+                    }
+                }
+            }
+
+            checkCollision(pipe) {
+                // AABB Collision (Axis-Aligned Bounding Box)
+                // Bird Box (smaller than visual for "Grace")
+                let bx = this.x - this.radius + 4;
+                let by = this.y - this.radius + 4;
+                let bw = (this.radius * 2) - 8;
+                let bh = (this.radius * 2) - 8;
+
+                // Pipe Boxes
+                // Top Pipe
+                if (bx < pipe.x + pipe.w && bx + bw > pipe.x &&
+                    by < pipe.top && by + bh > 0) {
+                    return true;
+                }
+                // Bottom Pipe
+                if (bx < pipe.x + pipe.w && bx + bw > pipe.x &&
+                    by + bh > pipe.bottom && by < 600) { // 600 is height
+                    return true;
+                }
+                return false;
+            }
+
+            render(p) {
+                p.push();
+                p.translate(this.x, this.y);
+                
+                // If dead, flip upside down or just freeze angle
+                if (this.dead) p.rotate(p.radians(90));
+                else p.rotate(p.radians(this.angle));
+
+                // Bird Body
+                p.stroke(0);
+                p.strokeWeight(2);
+                p.fill(this.color);
+                p.ellipse(0, 0, this.radius * 2.4, this.radius * 2);
+
+                // Eye
+                p.fill(255);
+                p.ellipse(6, -6, 10, 10);
+                p.fill(0);
+                p.ellipse(8, -6, 2, 2);
+
+                // Wing
+                p.fill(255);
+                p.ellipse(-6, 2, 10, 6);
+
+                // Beak
+                p.fill('#f39c12');
+                p.ellipse(8, 4, 8, 6);
+
+                p.pop();
+
+                // Draw Controls Indicator above bird
+                if (!this.dead) {
+                    p.noStroke();
+                    p.fill(255);
+                    p.textSize(10);
+                    p.textAlign(p.CENTER);
+                    let label = this.controlType === 'keyboard' ? this.controlKey : `P${this.id}`;
+                    p.text(label, this.x, this.y - 20);
+                }
+            }
+        }
+
+        class Pipe {
+            constructor(startX) {
+                this.x = startX;
+                this.w = 60; // Pipe width
+                this.gap = 130; // Aperture
+                this.speed = 3;
+                this.passed = false;
+                
+                // Randomize gap position
+                // Keep gap within screen bounds (with padding)
+                let minPipe = 50;
+                let maxPipe = 600 - 40 - this.gap - minPipe;
+                this.top = Math.random() * (maxPipe - minPipe) + minPipe;
+                this.bottom = this.top + this.gap;
+            }
+
+            update() {
+                this.x -= this.speed;
+            }
+
+            render(p) {
+                p.stroke(0);
+                p.strokeWeight(2);
+                p.fill('#73bf2e'); // Pipe green
+
+                // Top Pipe
+                p.rect(this.x, 0, this.w, this.top);
+                // Cap
+                p.rect(this.x - 2, this.top - 20, this.w + 4, 20);
+
+                // Bottom Pipe
+                p.rect(this.x, this.bottom, this.w, 600 - this.bottom - 40); // -40 for ground
+                // Cap
+                p.rect(this.x - 2, this.bottom, this.w + 4, 20);
+            }
+        }
+
+    </script>
+</body>
+</html>
