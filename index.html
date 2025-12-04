@@ -10,7 +10,7 @@
     <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
     
-    <!-- 2. Favicon (Base64 to prevent 404) -->
+    <!-- 2. Favicon -->
     <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAABTSURBVDhPY/wPBAw4wTAlBqXYAYjiP1gUpZgQGwXEA0Y0xXBxNMcKGEVkTUwM6K4ZBaMCRhFZE0s0w8TRHCtgFJE1MTEw4ATDlBiUYgeA4j9YFKWY/wEa1h8V+D7/EwAAAABJRU5ErkJggg==">
 
     <style>
@@ -20,7 +20,8 @@
             background-color: #333;
             font-family: 'Press Start 2P', cursive;
             overflow: hidden;
-            touch-action: manipulation;
+            touch-action: none; /* Disables browser handling of gestures */
+            user-select: none;
         }
 
         #game-container {
@@ -33,7 +34,7 @@
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
             display: flex; flex-direction: column;
             justify-content: center; align-items: center;
-            background: rgba(0,0,0,0.85); color: white;
+            background: rgba(0,0,0,0.9); color: white;
             z-index: 10; text-align: center;
         }
 
@@ -66,15 +67,21 @@
         #mobile-controller {
             background-color: #4ec0ca; width: 100%; height: 100%;
             display: flex; flex-direction: column; align-items: center; justify-content: center;
+            position: relative;
         }
 
         #flap-btn {
-            width: 80vw; height: 60vh; background: #f1c40f;
+            width: 80vw; height: 50vh; background: #f1c40f;
             border: 8px solid #f39c12; border-radius: 20px;
             font-size: 24px; color: #d35400;
             touch-action: manipulation; -webkit-tap-highlight-color: transparent;
         }
         #flap-btn:active { background: #fff; transform: scale(0.98); }
+
+        .exit-btn {
+            position: absolute; top: 20px; right: 20px;
+            padding: 10px; font-size: 10px; background: #555; border-color: #333;
+        }
 
         .player-chip {
             display: inline-block; padding: 5px 10px; margin: 5px;
@@ -111,17 +118,19 @@
         <button onclick="window.requestReadyCheck()">START READY CHECK</button>
     </div>
 
-    <div id="ready-screen" class="overlay hidden" style="background: rgba(0,0,0,0.3);">
-        <h1 style="color: #fff;">WAITING FOR READY</h1>
-        <p>All players must TAP/JUMP to start</p>
+    <div id="ready-screen" class="overlay hidden" style="background: rgba(0,0,0,0.6);">
+        <h1 style="color: #fff;">GET READY</h1>
+        <p>Everyone must JUMP to start</p>
         <div id="ready-status"></div>
     </div>
 
     <div id="mobile-ui" class="overlay hidden">
         <div id="mobile-controller">
-            <h2 style="color: white; text-shadow: 2px 2px #000;">TAP TO FLAP</h2>
+            <button class="exit-btn" onclick="window.disconnectMobile()">EXIT</button>
+            <h2 style="color: white; text-shadow: 2px 2px #000;">CONTROLLER</h2>
             <div id="mobile-status" style="margin-bottom: 20px; font-size: 10px;">Connected!</div>
-            <button id="flap-btn" ontouchstart="window.sendJump()" onmousedown="window.sendJump()">FLAP!</button>
+            <!-- ontouchstart handles mobile, onmousedown handles desktop testing -->
+            <button id="flap-btn" ontouchstart="window.sendJump(event)" onmousedown="window.sendJump(event)">FLAP!</button>
         </div>
     </div>
 
@@ -150,6 +159,7 @@
         let birds = [];
         let pipes = [];
         let score = 0;
+        let lastJumpTime = 0; // Debounce timestamp
         
         // Functions attached to window for HTML button access
         window.startHost = null; 
@@ -157,6 +167,8 @@
         window.sendJump = null;
         window.requestReadyCheck = null;
         window.resetGameFromUI = null;
+        window.disconnectMobile = null;
+        
         window.showJoinScreen = () => {
             document.getElementById('menu-screen').classList.add('hidden');
             document.getElementById('join-screen').classList.remove('hidden');
@@ -173,7 +185,6 @@
 
         /**
          * P5.JS SKETCH (Instance Mode)
-         * Keeps all p5 variables (width, height) within scope
          */
         const s = (p) => {
 
@@ -247,7 +258,7 @@
                 }
             };
 
-            // --- GAME LOGIC FUNCTIONS (INSIDE SKETCH SCOPE) ---
+            // --- GAME LOGIC FUNCTIONS ---
 
             window.startHost = () => {
                 MODE = 'HOST';
@@ -262,12 +273,32 @@
                 peer.on('connection', (c) => {
                     c.on('open', () => {
                         addPlayer('mobile', null, c);
+                        sendToMobile(c, 'WAITING', 'LOBBY...');
                     });
                     c.on('data', (data) => {
                         if (data.type === 'JUMP') handleJumpSignal(c.peer);
                     });
+                    c.on('close', () => {
+                        // Handle disconnect (remove bird)
+                        removePlayer(c.peer);
+                    });
                 });
             };
+
+            function sendToMobile(conn, status, btnText) {
+                if(conn && conn.open) {
+                    conn.send({ type: 'STATUS', status: status, btn: btnText });
+                }
+            }
+
+            function broadcastToMobiles(status, btnText) {
+                 birds.forEach(b => {
+                     if(b.controlType === 'mobile' && b.connId) {
+                         // Find connection (simplistic lookup, in real app store conn in bird)
+                         // We will store conn in bird for ease
+                     }
+                 });
+            }
 
             function addPlayer(type, key, connection) {
                 // Prevent duplicate entries
@@ -277,7 +308,16 @@
                 const id = birds.length + 1;
                 const color = COLORS[birds.length % COLORS.length];
                 const newBird = new Bird(id, color, type, key, connection ? connection.peer : null, p);
+                
+                // If mobile, store the connection object to send updates back
+                if(connection) newBird.connection = connection;
+
                 birds.push(newBird);
+                updateLobbyUI();
+            }
+
+            function removePlayer(connId) {
+                birds = birds.filter(b => b.connId !== connId);
                 updateLobbyUI();
             }
 
@@ -295,13 +335,22 @@
 
             window.requestReadyCheck = () => {
                 if (birds.length === 0) { alert("Need players!"); return; }
+                
                 GAME_STATE = 'READY';
+                
+                // Strict UI Toggle
                 document.getElementById('lobby-screen').classList.add('hidden');
                 document.getElementById('game-over-screen').classList.add('hidden');
                 document.getElementById('ready-screen').classList.remove('hidden');
                 
-                birds.forEach(b => b.reset()); // Reset positions
-                checkAllReady(); // Update UI
+                // Reset Birds
+                birds.forEach(b => {
+                    b.reset();
+                    // Update mobile screens
+                    if(b.connection) sendToMobile(b.connection, 'READY CHECK', 'TAP TO READY');
+                });
+
+                checkAllReady(); // Initial draw of list
             };
 
             function handleJumpSignal(peerId) {
@@ -309,8 +358,12 @@
                 if (!bird) return;
 
                 if (GAME_STATE === 'READY') {
-                    bird.isReady = true;
-                    checkAllReady();
+                    if (!bird.isReady) {
+                        bird.isReady = true;
+                        // Feedback to phone
+                        if(bird.connection) sendToMobile(bird.connection, 'READY!', 'WAITING...');
+                        checkAllReady();
+                    }
                 } else if (GAME_STATE === 'PLAY' && !bird.dead) {
                     bird.flap();
                 }
@@ -344,14 +397,18 @@
                 deadCount = 0;
                 pipes = [];
                 pipes.push(new Pipe(p.width, p));
+
+                // Notify Mobiles
+                birds.forEach(b => {
+                    if(b.connection) sendToMobile(b.connection, 'GO!', 'FLAP!');
+                });
             }
 
             window.resetGameFromUI = () => {
-                window.requestReadyCheck(); // Go back to ready check
+                window.requestReadyCheck(); 
             }
 
             function updateHover() {
-                // Birds bob up and down
                 birds.forEach(b => {
                     b.y = 300 + Math.sin(p.frameCount * 0.1) * 10;
                     b.angle = 0;
@@ -360,7 +417,6 @@
             }
 
             function updatePhysics() {
-                // Spawning
                 frameCountInternal++;
                 if (frameCountInternal % 100 === 0) {
                     pipes.push(new Pipe(p.width, p));
@@ -374,7 +430,6 @@
                     if (!bird.dead) {
                         bird.update();
                         
-                        // Collision
                         if (bird.y + bird.radius >= p.height - 40 || bird.y - bird.radius <= 0) {
                             bird.die(score);
                             deadCount++;
@@ -387,7 +442,6 @@
                             }
                         });
                     } else {
-                        // Fall to ground
                          if (bird.y < p.height - 40 - bird.radius) {
                              bird.velocity += 0.8; 
                              bird.y += bird.velocity;
@@ -395,7 +449,6 @@
                     }
                 });
 
-                // Scoring (Pass Center)
                 pipes.forEach(pipe => {
                     if (!pipe.passed && pipe.x + pipe.w < 100) {
                         score++;
@@ -414,7 +467,6 @@
                 const screen = document.getElementById('game-over-screen');
                 screen.classList.remove('hidden');
 
-                // Sort birds by score (descending)
                 const sorted = [...birds].sort((a, b) => b.finalScore - a.finalScore);
 
                 let html = `<table><tr><th>RANK</th><th>PLAYER</th><th>SCORE</th></tr>`;
@@ -429,14 +481,12 @@
                 cont.innerHTML = html;
             }
 
-            // --- DRAWING HELPERS ---
+            // --- DRAWING ---
             function drawBackground(p) {
                 p.background('#70c5ce'); 
-                // Simple cloud
                 p.fill(255); p.noStroke();
                 let cloudX = (p.frameCount * 0.5) % p.width;
                 p.rect(p.width - cloudX, p.height - 150, 100, 30);
-                // City
                 p.fill('#a3e063'); p.rect(0, p.height - 100, p.width, 100);
             }
 
@@ -483,14 +533,39 @@
                     document.getElementById('mobile-status').innerText = "CONNECTED TO " + inputVal;
                     document.getElementById('mobile-status').style.color = "#2ecc71";
                 });
-                conn.on('error', () => { alert("Connection Failed"); location.reload(); });
+                // Handle updates from host (Button Text Changes)
+                conn.on('data', (data) => {
+                    if (data.type === 'STATUS') {
+                        document.getElementById('mobile-status').innerText = data.status;
+                        document.getElementById('flap-btn').innerText = data.btn;
+                    }
+                });
+                conn.on('error', () => { alert("Connection Failed"); window.disconnectMobile(); });
+                conn.on('close', () => { alert("Host Closed"); window.disconnectMobile(); });
             });
         };
 
-        window.sendJump = () => {
+        window.sendJump = (e) => {
+            // DEBOUNCE & PREVENT DOUBLE TAP
+            if(e) e.preventDefault(); 
+            
+            const now = Date.now();
+            if (now - lastJumpTime < 150) return; // 150ms lockout
+            lastJumpTime = now;
+
             if (conn && conn.open) conn.send({ type: 'JUMP' });
         };
 
+        window.disconnectMobile = () => {
+            if (conn) conn.close();
+            if (peer) peer.destroy();
+            MODE = 'MENU';
+            document.getElementById('mobile-ui').classList.add('hidden');
+            document.getElementById('menu-screen').classList.remove('hidden');
+            // Reset fields
+            document.getElementById('host-id-input').value = "";
+            document.getElementById('flap-btn').innerText = "FLAP!";
+        };
 
         /**
          * CLASSES
@@ -502,7 +577,8 @@
                 this.controlType = controlType;
                 this.controlKey = controlKey;
                 this.connId = connId;
-                this.p = p; // Store p5 reference
+                this.connection = null; // Store PeerJS connection for messaging
+                this.p = p; 
                 this.finalScore = 0;
                 this.reset();
             }
@@ -533,8 +609,9 @@
                 if(this.dead) return;
                 this.dead = true;
                 this.finalScore = currentScore;
-                // Arcade Smack
                 this.velocity = 0; 
+                // Inform mobile
+                if(this.connection) sendToMobile(this.connection, 'DEAD', 'X_X');
             }
 
             update() {
@@ -573,7 +650,6 @@
                 this.p.fill('#f39c12'); this.p.ellipse(8, 4, 8, 6);
                 this.p.pop();
 
-                // Ready Indicator
                 if (GAME_STATE === 'READY' && this.isReady) {
                     this.p.fill('#2ecc71'); this.p.noStroke();
                     this.p.ellipse(this.x, this.y - 30, 10, 10);
@@ -611,6 +687,13 @@
                 this.p.rect(this.x - 2, this.top - 20, this.w + 4, 20);
                 this.p.rect(this.x, this.bottom, this.w, this.p.height - this.bottom - 40);
                 this.p.rect(this.x - 2, this.bottom, this.w + 4, 20);
+            }
+        }
+        
+        // Helper wrapper to avoid context errors
+        function sendToMobile(conn, status, btnText) {
+            if(conn && conn.open) {
+                conn.send({ type: 'STATUS', status: status, btn: btnText });
             }
         }
     </script>
