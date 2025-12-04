@@ -29,6 +29,7 @@
             height: 100vh; background-color: #222;
         }
 
+        /* UI Overlays */
         .overlay {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
             display: flex; flex-direction: column;
@@ -56,11 +57,13 @@
             width: 250px; margin-bottom: 20px; text-transform: uppercase;
         }
 
+        /* Leaderboard Table */
         table { border-collapse: collapse; margin: 20px; width: 80%; max-width: 600px; }
         th, td { border: 2px solid #555; padding: 10px; text-align: center; font-size: 12px; }
         th { background: #444; color: #f1c40f; }
         tr:nth-child(even) { background: #222; }
 
+        /* Mobile Controller */
         #mobile-controller {
             background-color: #4ec0ca; width: 100%; height: 100%;
             display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -83,6 +86,10 @@
         .player-chip {
             display: inline-block; padding: 5px 10px; margin: 5px;
             border: 2px solid white; font-size: 10px;
+        }
+        
+        #latency-meter {
+            color: #2ecc71; font-size: 10px; margin-top: 10px;
         }
     </style>
 </head>
@@ -111,6 +118,7 @@
         <p>Game ID:</p>
         <h2 id="display-id" style="font-size: 40px; color: #333; background: #fff; padding: 10px;">...</h2>
         <div id="player-list" style="margin: 20px; min-height: 50px;"></div>
+        <div id="latency-meter">Network Delay: 0ms</div>
         <p style="color: #e74c3c; font-size: 10px;">Waiting for players...</p>
         <button onclick="window.requestReadyCheck()">START READY CHECK</button>
     </div>
@@ -147,18 +155,21 @@
         let MODE = 'MENU'; 
         let GAME_STATE = 'LOBBY'; 
         
+        // PeerJS
         let peer, conn;
+        
+        // Shared Game Data
         let birds = [];
         let pipes = [];
         let score = 0;
-        let lastJumpTime = 0;
+        let lastJumpTime = 0; // Debounce
         
-        // --- LATENCY EQUALIZATION SYSTEM ---
-        let mobileLatencyMap = {}; // Map of peerId -> latency in ms
-        let currentFairnessDelay = 0; // The calculated delay applied to keyboard players
-        const LATENCY_BUFFER = 10; // Extra safety buffer in ms
-
-        // HTML Hook Functions
+        // LATENCY EQUALIZATION SYSTEM
+        let mobileConnections = []; // Store active conn objects
+        let pingInterval = null;
+        let calculatedSystemLag = 0; // ms to delay local players
+        
+        // Window Functions
         window.startHost = null; 
         window.connectToHost = null;
         window.sendJump = null;
@@ -181,7 +192,7 @@
         }
 
         /**
-         * P5.JS SKETCH (Host Logic)
+         * P5.JS SKETCH
          */
         const s = (p) => {
 
@@ -192,6 +203,16 @@
             p.setup = () => {
                 p.createCanvas(800, 600);
                 p.noSmooth();
+                
+                // Start Ping Loop for Host
+                setInterval(() => {
+                    if (MODE === 'HOST' && mobileConnections.length > 0) {
+                        measureNetworkLatency();
+                    } else {
+                        calculatedSystemLag = 0;
+                        updateLatencyUI(0);
+                    }
+                }, 1000); // Check every second
             };
 
             p.draw = () => {
@@ -204,7 +225,7 @@
                 } 
                 else if (GAME_STATE === 'READY') {
                     drawGround(p);
-                    drawBirds(p); 
+                    drawBirds(p);
                     updateHover();
                 }
                 else if (GAME_STATE === 'PLAY') {
@@ -213,17 +234,6 @@
                     drawGround(p);
                     drawBirds(p);
                     drawUI(p);
-                    
-                    // Debug Latency info
-                    if (currentFairnessDelay > 0) {
-                        p.fill(0, 200);
-                        p.noStroke();
-                        p.rect(0, p.height-20, 200, 20);
-                        p.fill('#0f0');
-                        p.textSize(10);
-                        p.textAlign(p.LEFT);
-                        p.text(`FAIRNESS DELAY: ${Math.floor(currentFairnessDelay)}ms`, 10, p.height - 7);
-                    }
                 } 
                 else if (GAME_STATE === 'GAMEOVER') {
                     drawPipes(p);
@@ -232,48 +242,46 @@
                 }
             };
 
-            // --- INPUT HANDLING WITH FAIRNESS DELAY ---
+            // --- INPUT HANDLING WITH LAG EQUALIZATION ---
             p.keyPressed = () => {
                 if (MODE !== 'HOST') return;
 
-                const hasMobile = birds.some(b => b.controlType === 'mobile');
-                const delay = hasMobile ? currentFairnessDelay : 0;
-
-                // WRAP LOGIC IN DELAY FUNCTION
-                const executeInput = () => {
-                    // LOBBY
-                    if (GAME_STATE === 'LOBBY') {
-                        if (p.keyCode === 13 || p.keyCode === 27 || p.keyCode === 18) return; 
-                        addPlayer('keyboard', p.key.toUpperCase(), null);
-                    }
-                    // READY
-                    else if (GAME_STATE === 'READY') {
-                        birds.forEach(b => {
-                            if (b.controlType === 'keyboard' && b.controlKey === p.key.toUpperCase()) {
-                                b.isReady = true;
-                                checkAllReady();
-                            }
-                        });
-                    }
-                    // PLAY
-                    else if (GAME_STATE === 'PLAY') {
-                        birds.forEach(b => {
-                            if (b.controlType === 'keyboard' && b.controlKey === p.key.toUpperCase() && !b.dead) {
-                                b.flap();
-                            }
-                        });
-                    }
-                };
-
-                // Apply Delay or Execute Immediately
-                if (delay > 5) {
-                    setTimeout(executeInput, delay);
-                } else {
-                    executeInput();
+                // LOBBY: Add Player (Instant)
+                if (GAME_STATE === 'LOBBY') {
+                    if (p.keyCode === 13 || p.keyCode === 27 || p.keyCode === 18) return; 
+                    addPlayer('keyboard', p.key.toUpperCase(), null);
+                    return;
                 }
+
+                // If no mobile players, 0 delay. If mobile players, apply delay.
+                const delay = (mobileConnections.length > 0) ? calculatedSystemLag : 0;
+
+                setTimeout(() => {
+                    handleLocalInput(p.key.toUpperCase());
+                }, delay);
             };
 
-            // --- CORE LOGIC ---
+            function handleLocalInput(key) {
+                // READY PHASE
+                if (GAME_STATE === 'READY') {
+                    birds.forEach(b => {
+                        if (b.controlType === 'keyboard' && b.controlKey === key) {
+                            b.isReady = true;
+                            checkAllReady();
+                        }
+                    });
+                }
+                // PLAY PHASE
+                else if (GAME_STATE === 'PLAY') {
+                    birds.forEach(b => {
+                        if (b.controlType === 'keyboard' && b.controlKey === key && !b.dead) {
+                            b.flap();
+                        }
+                    });
+                }
+            }
+
+            // --- NETWORK & LATENCY LOGIC ---
 
             window.startHost = () => {
                 MODE = 'HOST';
@@ -284,56 +292,75 @@
                 document.getElementById('display-id').innerText = shortID;
                 
                 peer = new Peer('flocky-' + shortID);
-                peer.on('open', (id) => {
-                    // Start the Latency Ping Loop
-                    setInterval(pingLoop, 1000);
-                });
-
+                peer.on('open', (id) => console.log('Host Open:', id));
+                
                 peer.on('connection', (c) => {
                     c.on('open', () => {
+                        // Add to connections list for Pinging
+                        mobileConnections.push({ conn: c, rtt: 0 });
+                        
                         addPlayer('mobile', null, c);
                         sendToMobile(c, 'WAITING', 'LOBBY...');
                     });
+                    
                     c.on('data', (data) => {
                         if (data.type === 'JUMP') handleJumpSignal(c.peer);
                         if (data.type === 'PONG') handlePong(c.peer, data.ts);
                     });
-                    c.on('close', () => removePlayer(c.peer));
+                    
+                    c.on('close', () => {
+                        removePlayer(c.peer);
+                    });
                 });
             };
 
-            // --- LATENCY CALCULATION ---
-            function pingLoop() {
-                // Send Ping to all connected mobiles
+            function measureNetworkLatency() {
                 const now = Date.now();
-                birds.forEach(b => {
-                    if (b.controlType === 'mobile' && b.connection) {
-                        b.connection.send({ type: 'PING', ts: now });
+                mobileConnections.forEach(item => {
+                    if (item.conn.open) {
+                        item.conn.send({ type: 'PING', ts: now });
                     }
                 });
-
-                // Update global delay based on max latency found
-                const latencies = Object.values(mobileLatencyMap);
-                if (latencies.length > 0) {
-                    const maxLatency = Math.max(...latencies);
-                    // Smooth average could be better, but Max ensures total fairness
-                    currentFairnessDelay = maxLatency + LATENCY_BUFFER;
-                } else {
-                    currentFairnessDelay = 0;
-                }
             }
 
             function handlePong(peerId, originalTs) {
                 const now = Date.now();
                 const rtt = now - originalTs;
-                const oneWay = rtt / 2;
-                mobileLatencyMap[peerId] = oneWay;
+                const connectionItem = mobileConnections.find(m => m.conn.peer === peerId);
+                if (connectionItem) {
+                    connectionItem.rtt = rtt;
+                }
+                recalculateSystemLag();
             }
 
-            function sendToMobile(conn, status, btnText) {
-                if(conn && conn.open) {
-                    conn.send({ type: 'STATUS', status: status, btn: btnText });
+            function recalculateSystemLag() {
+                if (mobileConnections.length === 0) {
+                    calculatedSystemLag = 0;
+                } else {
+                    // Average One-Way Latency (RTT / 2)
+                    let totalRtt = 0;
+                    mobileConnections.forEach(m => totalRtt += m.rtt);
+                    let avgRtt = totalRtt / mobileConnections.length;
+                    calculatedSystemLag = Math.floor(avgRtt / 2); 
                 }
+                updateLatencyUI(calculatedSystemLag);
+            }
+
+            function updateLatencyUI(lag) {
+                const el = document.getElementById('latency-meter');
+                if (lag > 0) {
+                    el.innerText = `Equalizing Delay: ${lag}ms added to Keyboard`;
+                    el.style.color = '#f1c40f'; // Warning color
+                } else {
+                    el.innerText = `Local Mode (Instant Response)`;
+                    el.style.color = '#2ecc71';
+                }
+            }
+
+            // --- GAME LOGIC ---
+
+            function sendToMobile(conn, status, btnText) {
+                if(conn && conn.open) conn.send({ type: 'STATUS', status: status, btn: btnText });
             }
 
             function addPlayer(type, key, connection) {
@@ -343,16 +370,17 @@
                 const id = birds.length + 1;
                 const color = COLORS[birds.length % COLORS.length];
                 const newBird = new Bird(id, color, type, key, connection ? connection.peer : null, p);
+                
                 if(connection) newBird.connection = connection;
-
                 birds.push(newBird);
                 updateLobbyUI();
             }
 
             function removePlayer(connId) {
                 birds = birds.filter(b => b.connId !== connId);
-                delete mobileLatencyMap[connId]; // Remove from latency calc
+                mobileConnections = mobileConnections.filter(m => m.conn.peer !== connId);
                 updateLobbyUI();
+                recalculateSystemLag();
             }
 
             function updateLobbyUI() {
@@ -382,6 +410,8 @@
             };
 
             function handleJumpSignal(peerId) {
+                // Mobile inputs arrive naturally delayed by network.
+                // We process them IMMEDIATELY upon arrival to match the delayed local input.
                 const bird = birds.find(b => b.connId === peerId);
                 if (!bird) return;
 
@@ -399,6 +429,7 @@
             function checkAllReady() {
                 const statusDiv = document.getElementById('ready-status');
                 statusDiv.innerHTML = '';
+                
                 let allReady = true;
                 birds.forEach(b => {
                     const d = document.createElement('div');
@@ -442,7 +473,6 @@
                 frameCountInternal++;
                 if (frameCountInternal % 100 === 0) pipes.push(new Pipe(p.width, p));
                 if (pipes.length > 0 && pipes[0].x < -pipes[0].w) pipes.shift();
-
                 pipes.forEach(pipe => pipe.update());
 
                 birds.forEach(bird => {
@@ -452,7 +482,9 @@
                             bird.die(score); deadCount++;
                         }
                         pipes.forEach(pipe => {
-                            if (bird.checkCollision(pipe)) { bird.die(score); deadCount++; }
+                            if (bird.checkCollision(pipe)) {
+                                bird.die(score); deadCount++;
+                            }
                         });
                     } else {
                          if (bird.y < p.height - 40 - bird.radius) {
@@ -475,7 +507,6 @@
                 const cont = document.getElementById('leaderboard-container');
                 const screen = document.getElementById('game-over-screen');
                 screen.classList.remove('hidden');
-
                 const sorted = [...birds].sort((a, b) => b.finalScore - a.finalScore);
                 let html = `<table><tr><th>RANK</th><th>PLAYER</th><th>SCORE</th></tr>`;
                 sorted.forEach((b, index) => {
@@ -485,7 +516,7 @@
                 cont.innerHTML = html;
             }
 
-            // --- DRAWING ---
+            // DRAWING HELPERS
             function drawBackground(p) {
                 p.background('#70c5ce'); 
                 p.fill(255); p.noStroke();
@@ -493,7 +524,6 @@
                 p.rect(p.width - cloudX, p.height - 150, 100, 30);
                 p.fill('#a3e063'); p.rect(0, p.height - 100, p.width, 100);
             }
-
             function drawGround(p) {
                 p.fill('#ded895'); p.stroke('#555'); p.strokeWeight(2);
                 p.rect(0, p.height - 40, p.width, 40);
@@ -501,23 +531,17 @@
                 p.stroke('#555'); p.strokeWeight(2);
                 p.line(0, p.height - 40, p.width, p.height - 40);
                 if (GAME_STATE === 'PLAY') groundX = (groundX + 3) % 20;
-                for (let i = -20; i < p.width; i+=20) {
-                    p.line(i - groundX, p.height - 40, i - groundX - 10, p.height);
-                }
+                for (let i = -20; i < p.width; i+=20) p.line(i - groundX, p.height - 40, i - groundX - 10, p.height);
             }
-
             function drawBirds(p) { birds.forEach(b => b.render()); }
             function drawPipes(p) { pipes.forEach(pi => pi.render()); }
-            
             function drawUI(p) {
-                p.textAlign(p.CENTER); p.textSize(40); p.stroke(0);
-                p.strokeWeight(4); p.fill(255);
+                p.textAlign(p.CENTER); p.textSize(40); p.stroke(0); p.strokeWeight(4); p.fill(255);
                 p.text(score, p.width / 2, 80);
             }
         };
 
         new p5(s, 'game-container');
-
 
         /**
          * CONTROLLER (MOBILE) LOGIC
@@ -535,19 +559,16 @@
                     document.getElementById('mobile-status').innerText = "CONNECTED TO " + inputVal;
                     document.getElementById('mobile-status').style.color = "#2ecc71";
                 });
-                
                 conn.on('data', (data) => {
-                    // HANDLE PING
-                    if (data.type === 'PING') {
-                        conn.send({ type: 'PONG', ts: data.ts });
-                    }
-                    // HANDLE STATUS
                     if (data.type === 'STATUS') {
                         document.getElementById('mobile-status').innerText = data.status;
                         document.getElementById('flap-btn').innerText = data.btn;
                     }
+                    if (data.type === 'PING') {
+                        // Send PONG back immediately with original timestamp
+                        conn.send({ type: 'PONG', ts: data.ts });
+                    }
                 });
-                
                 conn.on('error', () => { alert("Connection Failed"); window.disconnectMobile(); });
                 conn.on('close', () => { alert("Host Closed"); window.disconnectMobile(); });
             });
@@ -556,7 +577,7 @@
         window.sendJump = (e) => {
             if(e) e.preventDefault(); 
             const now = Date.now();
-            if (now - lastJumpTime < 150) return; 
+            if (now - lastJumpTime < 150) return;
             lastJumpTime = now;
             if (conn && conn.open) conn.send({ type: 'JUMP' });
         };
@@ -581,43 +602,34 @@
                 this.connection = null; this.p = p; this.finalScore = 0;
                 this.reset();
             }
-
             getName() { return this.controlType === 'keyboard' ? `KEY ${this.controlKey}` : `MOBILE P${this.id}`; }
-
             reset() {
-                this.x = 100; this.y = 300; this.velocity = 0;
-                this.gravity = 0.5; this.lift = -8; this.radius = 12;
-                this.dead = false; this.angle = 0; this.isReady = false;
-                this.finalScore = 0;
+                this.x = 100; this.y = 300; this.velocity = 0; this.gravity = 0.5;
+                this.lift = -8; this.radius = 12; this.dead = false;
+                this.angle = 0; this.isReady = false; this.finalScore = 0;
             }
-
             flap() { this.velocity = this.lift; this.angle = -25; }
-
             die(currentScore) {
                 if(this.dead) return;
                 this.dead = true; this.finalScore = currentScore; this.velocity = 0; 
                 if(this.connection) sendToMobile(this.connection, 'DEAD', 'X_X');
             }
-
             update() {
                 this.velocity += this.gravity; this.y += this.velocity;
                 if (this.velocity < 0) this.angle = -25;
                 else if (this.angle < 90) this.angle += 3;
             }
-
             checkCollision(pipe) {
-                let bx = this.x - this.radius + 4;
-                let by = this.y - this.radius + 4;
-                let bw = (this.radius * 2) - 8;
-                let bh = (this.radius * 2) - 8;
+                let bx = this.x - this.radius + 4; let by = this.y - this.radius + 4;
+                let bw = (this.radius * 2) - 8; let bh = (this.radius * 2) - 8;
                 if (bx < pipe.x + pipe.w && bx + bw > pipe.x && by < pipe.top && by + bh > 0) return true;
                 if (bx < pipe.x + pipe.w && bx + bw > pipe.x && by + bh > pipe.bottom && by < this.p.height) return true;
                 return false;
             }
-
             render() {
                 this.p.push(); this.p.translate(this.x, this.y);
-                if (this.dead) this.p.rotate(this.p.radians(90)); else this.p.rotate(this.p.radians(this.angle));
+                if (this.dead) this.p.rotate(this.p.radians(90));
+                else this.p.rotate(this.p.radians(this.angle));
                 this.p.stroke(0); this.p.strokeWeight(2); this.p.fill(this.color);
                 this.p.ellipse(0, 0, this.radius * 2.4, this.radius * 2);
                 this.p.fill(255); this.p.ellipse(6, -6, 10, 10);
@@ -625,7 +637,6 @@
                 this.p.fill(255); this.p.ellipse(-6, 2, 10, 6);
                 this.p.fill('#f39c12'); this.p.ellipse(8, 4, 8, 6);
                 this.p.pop();
-
                 if (GAME_STATE === 'READY' && this.isReady) {
                     this.p.fill('#2ecc71'); this.p.noStroke(); this.p.ellipse(this.x, this.y - 30, 10, 10);
                 }
@@ -640,7 +651,8 @@
 
         class Pipe {
             constructor(startX, p) {
-                this.x = startX; this.p = p; this.w = 60; this.gap = 130; this.speed = 3; this.passed = false;
+                this.x = startX; this.p = p; this.w = 60; this.gap = 130;
+                this.speed = 3; this.passed = false;
                 let minPipe = 50; let maxPipe = p.height - 40 - this.gap - minPipe;
                 this.top = Math.random() * (maxPipe - minPipe) + minPipe;
                 this.bottom = this.top + this.gap;
