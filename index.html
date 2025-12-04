@@ -550,7 +550,7 @@
             if(e) e.preventDefault(); 
             
             const now = Date.now();
-            if (now - lastJumpTime < 150) return; // 150ms lockout
+            if (now - lastJumpTime < 50) return; // 50ms lockout
             lastJumpTime = now;
 
             if (conn && conn.open) conn.send({ type: 'JUMP' });
