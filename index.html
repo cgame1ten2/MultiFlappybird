@@ -29,7 +29,6 @@
             height: 100vh; background-color: #222;
         }
 
-        /* UI Overlays */
         .overlay {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
             display: flex; flex-direction: column;
@@ -57,13 +56,11 @@
             width: 250px; margin-bottom: 20px; text-transform: uppercase;
         }
 
-        /* Leaderboard Table */
         table { border-collapse: collapse; margin: 20px; width: 80%; max-width: 600px; }
         th, td { border: 2px solid #555; padding: 10px; text-align: center; font-size: 12px; }
         th { background: #444; color: #f1c40f; }
         tr:nth-child(even) { background: #222; }
 
-        /* Mobile Controller */
         #mobile-controller {
             background-color: #4ec0ca; width: 100%; height: 100%;
             display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -94,7 +91,7 @@
     <!-- MENUS & SCREENS -->
     <div id="menu-screen" class="overlay">
         <h1>FLOCKY BIRDS</h1>
-        <p>Fair Play Edition</p>
+        <p>Fairness Update</p>
         <br>
         <button onclick="window.startHost()">HOST GAME (Desktop)</button>
         <button onclick="window.showJoinScreen()">JOIN GAME (Mobile)</button>
@@ -150,22 +147,18 @@
         let MODE = 'MENU'; 
         let GAME_STATE = 'LOBBY'; 
         
-        // PeerJS
         let peer, conn;
-        let connections = []; // Stores raw connection objects
-        let hostId = null;
-
-        // Shared Game Data
         let birds = [];
         let pipes = [];
         let score = 0;
         let lastJumpTime = 0;
         
-        // Latency Fairness System
-        let mobileLatencies = {}; // Map connId -> ms
-        let currentFairnessDelay = 0; // The calculated delay applied to Host
+        // --- LATENCY EQUALIZATION SYSTEM ---
+        let mobileLatencyMap = {}; // Map of peerId -> latency in ms
+        let currentFairnessDelay = 0; // The calculated delay applied to keyboard players
+        const LATENCY_BUFFER = 10; // Extra safety buffer in ms
 
-        // Window Bindings
+        // HTML Hook Functions
         window.startHost = null; 
         window.connectToHost = null;
         window.sendJump = null;
@@ -188,16 +181,13 @@
         }
 
         /**
-         * P5.JS SKETCH
+         * P5.JS SKETCH (Host Logic)
          */
         const s = (p) => {
 
             let groundX = 0;
             let frameCountInternal = 0;
             let deadCount = 0;
-            
-            // Ping Interval for Latency Check
-            let pingInterval = null;
 
             p.setup = () => {
                 p.createCanvas(800, 600);
@@ -223,19 +213,22 @@
                     drawGround(p);
                     drawBirds(p);
                     drawUI(p);
+                    
+                    // Debug Latency info
+                    if (currentFairnessDelay > 0) {
+                        p.fill(0, 200);
+                        p.noStroke();
+                        p.rect(0, p.height-20, 200, 20);
+                        p.fill('#0f0');
+                        p.textSize(10);
+                        p.textAlign(p.LEFT);
+                        p.text(`FAIRNESS DELAY: ${Math.floor(currentFairnessDelay)}ms`, 10, p.height - 7);
+                    }
                 } 
                 else if (GAME_STATE === 'GAMEOVER') {
                     drawPipes(p);
                     drawGround(p);
                     drawBirds(p);
-                }
-
-                // Debug: Show Fairness Delay
-                p.fill(0); p.noStroke(); p.textAlign(p.RIGHT); p.textSize(10);
-                if (currentFairnessDelay > 0) {
-                     p.text(`Fairness Delay: ${Math.round(currentFairnessDelay)}ms`, p.width - 10, p.height - 10);
-                } else {
-                     p.text(`Local: Instant`, p.width - 10, p.height - 10);
                 }
             };
 
@@ -243,17 +236,20 @@
             p.keyPressed = () => {
                 if (MODE !== 'HOST') return;
 
-                // Function to Execute the actual Logic
-                const executeInput = (key) => {
+                const hasMobile = birds.some(b => b.controlType === 'mobile');
+                const delay = hasMobile ? currentFairnessDelay : 0;
+
+                // WRAP LOGIC IN DELAY FUNCTION
+                const executeInput = () => {
                     // LOBBY
                     if (GAME_STATE === 'LOBBY') {
                         if (p.keyCode === 13 || p.keyCode === 27 || p.keyCode === 18) return; 
-                        addPlayer('keyboard', key, null);
+                        addPlayer('keyboard', p.key.toUpperCase(), null);
                     }
                     // READY
                     else if (GAME_STATE === 'READY') {
                         birds.forEach(b => {
-                            if (b.controlType === 'keyboard' && b.controlKey === key) {
+                            if (b.controlType === 'keyboard' && b.controlKey === p.key.toUpperCase()) {
                                 b.isReady = true;
                                 checkAllReady();
                             }
@@ -262,27 +258,22 @@
                     // PLAY
                     else if (GAME_STATE === 'PLAY') {
                         birds.forEach(b => {
-                            if (b.controlType === 'keyboard' && b.controlKey === key && !b.dead) {
+                            if (b.controlType === 'keyboard' && b.controlKey === p.key.toUpperCase() && !b.dead) {
                                 b.flap();
                             }
                         });
                     }
                 };
 
-                // The Delay Logic
-                // If there are mobile players, we delay the local input execution
-                // to match the worst connection.
-                if (currentFairnessDelay > 0 && (GAME_STATE === 'PLAY' || GAME_STATE === 'READY')) {
-                    setTimeout(() => {
-                        executeInput(p.key.toUpperCase());
-                    }, currentFairnessDelay);
+                // Apply Delay or Execute Immediately
+                if (delay > 5) {
+                    setTimeout(executeInput, delay);
                 } else {
-                    // Instant if no mobile players or delay is negligible
-                    executeInput(p.key.toUpperCase());
+                    executeInput();
                 }
             };
 
-            // --- HOST LOGIC ---
+            // --- CORE LOGIC ---
 
             window.startHost = () => {
                 MODE = 'HOST';
@@ -293,72 +284,51 @@
                 document.getElementById('display-id').innerText = shortID;
                 
                 peer = new Peer('flocky-' + shortID);
-                peer.on('open', (id) => console.log('Host:', id));
-                
-                // Start the Ping Loop (Every 1 second)
-                pingInterval = setInterval(checkLatencies, 1000);
+                peer.on('open', (id) => {
+                    // Start the Latency Ping Loop
+                    setInterval(pingLoop, 1000);
+                });
 
                 peer.on('connection', (c) => {
-                    connections.push(c);
-
                     c.on('open', () => {
                         addPlayer('mobile', null, c);
                         sendToMobile(c, 'WAITING', 'LOBBY...');
                     });
-                    
                     c.on('data', (data) => {
                         if (data.type === 'JUMP') handleJumpSignal(c.peer);
-                        if (data.type === 'PONG') handlePong(c.peer, data.time);
+                        if (data.type === 'PONG') handlePong(c.peer, data.ts);
                     });
-
-                    c.on('close', () => {
-                        removePlayer(c.peer);
-                    });
+                    c.on('close', () => removePlayer(c.peer));
                 });
             };
 
-            // --- LATENCY SYSTEM ---
-
-            function checkLatencies() {
-                // Send PING to all connected phones
+            // --- LATENCY CALCULATION ---
+            function pingLoop() {
+                // Send Ping to all connected mobiles
                 const now = Date.now();
-                connections.forEach(c => {
-                    if (c.open) {
-                        c.send({ type: 'PING', time: now });
-                    }
-                });
-            }
-
-            function handlePong(peerId, sentTime) {
-                const now = Date.now();
-                const rtt = now - sentTime;
-                const oneWay = rtt / 2; // Approximate one-way travel time
-                
-                mobileLatencies[peerId] = oneWay;
-                updateFairnessDelay();
-            }
-
-            function updateFairnessDelay() {
-                // Find highest latency among connected mobile birds
-                let maxLatency = 0;
-                let hasMobile = false;
-
                 birds.forEach(b => {
-                    if (b.controlType === 'mobile' && b.connId) {
-                        hasMobile = true;
-                        let lat = mobileLatencies[b.connId] || 0;
-                        if (lat > maxLatency) maxLatency = lat;
+                    if (b.controlType === 'mobile' && b.connection) {
+                        b.connection.send({ type: 'PING', ts: now });
                     }
                 });
 
-                if (hasMobile) {
-                    currentFairnessDelay = maxLatency; 
+                // Update global delay based on max latency found
+                const latencies = Object.values(mobileLatencyMap);
+                if (latencies.length > 0) {
+                    const maxLatency = Math.max(...latencies);
+                    // Smooth average could be better, but Max ensures total fairness
+                    currentFairnessDelay = maxLatency + LATENCY_BUFFER;
                 } else {
-                    currentFairnessDelay = 0; // No delay if all local
+                    currentFairnessDelay = 0;
                 }
             }
 
-            // --- PLAYER MANAGEMENT ---
+            function handlePong(peerId, originalTs) {
+                const now = Date.now();
+                const rtt = now - originalTs;
+                const oneWay = rtt / 2;
+                mobileLatencyMap[peerId] = oneWay;
+            }
 
             function sendToMobile(conn, status, btnText) {
                 if(conn && conn.open) {
@@ -373,22 +343,16 @@
                 const id = birds.length + 1;
                 const color = COLORS[birds.length % COLORS.length];
                 const newBird = new Bird(id, color, type, key, connection ? connection.peer : null, p);
-                
                 if(connection) newBird.connection = connection;
 
                 birds.push(newBird);
                 updateLobbyUI();
-                updateFairnessDelay(); // Recalc delay
             }
 
             function removePlayer(connId) {
                 birds = birds.filter(b => b.connId !== connId);
-                // Also remove from raw connections list
-                connections = connections.filter(c => c.peer !== connId);
-                delete mobileLatencies[connId];
-                
+                delete mobileLatencyMap[connId]; // Remove from latency calc
                 updateLobbyUI();
-                updateFairnessDelay();
             }
 
             function updateLobbyUI() {
@@ -405,7 +369,6 @@
 
             window.requestReadyCheck = () => {
                 if (birds.length === 0) { alert("Need players!"); return; }
-                
                 GAME_STATE = 'READY';
                 document.getElementById('lobby-screen').classList.add('hidden');
                 document.getElementById('game-over-screen').classList.add('hidden');
@@ -415,7 +378,6 @@
                     b.reset();
                     if(b.connection) sendToMobile(b.connection, 'READY CHECK', 'TAP TO READY');
                 });
-
                 checkAllReady();
             };
 
@@ -437,7 +399,6 @@
             function checkAllReady() {
                 const statusDiv = document.getElementById('ready-status');
                 statusDiv.innerHTML = '';
-                
                 let allReady = true;
                 birds.forEach(b => {
                     const d = document.createElement('div');
@@ -462,15 +423,12 @@
                 deadCount = 0;
                 pipes = [];
                 pipes.push(new Pipe(p.width, p));
-
                 birds.forEach(b => {
                     if(b.connection) sendToMobile(b.connection, 'GO!', 'FLAP!');
                 });
             }
 
-            window.resetGameFromUI = () => {
-                window.requestReadyCheck(); 
-            }
+            window.resetGameFromUI = () => { window.requestReadyCheck(); }
 
             function updateHover() {
                 birds.forEach(b => {
@@ -482,10 +440,7 @@
 
             function updatePhysics() {
                 frameCountInternal++;
-                if (frameCountInternal % 100 === 0) {
-                    pipes.push(new Pipe(p.width, p));
-                }
-
+                if (frameCountInternal % 100 === 0) pipes.push(new Pipe(p.width, p));
                 if (pipes.length > 0 && pipes[0].x < -pipes[0].w) pipes.shift();
 
                 pipes.forEach(pipe => pipe.update());
@@ -493,36 +448,26 @@
                 birds.forEach(bird => {
                     if (!bird.dead) {
                         bird.update();
-                        
                         if (bird.y + bird.radius >= p.height - 40 || bird.y - bird.radius <= 0) {
-                            bird.die(score);
-                            deadCount++;
+                            bird.die(score); deadCount++;
                         }
-                        
                         pipes.forEach(pipe => {
-                            if (bird.checkCollision(pipe)) {
-                                bird.die(score);
-                                deadCount++;
-                            }
+                            if (bird.checkCollision(pipe)) { bird.die(score); deadCount++; }
                         });
                     } else {
                          if (bird.y < p.height - 40 - bird.radius) {
-                             bird.velocity += 0.8; 
-                             bird.y += bird.velocity;
+                             bird.velocity += 0.8; bird.y += bird.velocity;
                         }
                     }
                 });
 
                 pipes.forEach(pipe => {
                     if (!pipe.passed && pipe.x + pipe.w < 100) {
-                        score++;
-                        pipe.passed = true;
+                        score++; pipe.passed = true;
                     }
                 });
 
-                if (deadCount === birds.length) {
-                    showLeaderboard();
-                }
+                if (deadCount === birds.length) showLeaderboard();
             }
 
             function showLeaderboard() {
@@ -532,14 +477,9 @@
                 screen.classList.remove('hidden');
 
                 const sorted = [...birds].sort((a, b) => b.finalScore - a.finalScore);
-
                 let html = `<table><tr><th>RANK</th><th>PLAYER</th><th>SCORE</th></tr>`;
                 sorted.forEach((b, index) => {
-                    html += `<tr>
-                        <td>${index + 1}</td>
-                        <td style="color:${b.color}">${b.getName()}</td>
-                        <td>${b.finalScore}</td>
-                    </tr>`;
+                    html += `<tr><td>${index + 1}</td><td style="color:${b.color}">${b.getName()}</td><td>${b.finalScore}</td></tr>`;
                 });
                 html += `</table>`;
                 cont.innerHTML = html;
@@ -560,9 +500,7 @@
                 p.fill('#73bf2e'); p.noStroke(); p.rect(0, p.height - 40, p.width, 10);
                 p.stroke('#555'); p.strokeWeight(2);
                 p.line(0, p.height - 40, p.width, p.height - 40);
-                
                 if (GAME_STATE === 'PLAY') groundX = (groundX + 3) % 20;
-                
                 for (let i = -20; i < p.width; i+=20) {
                     p.line(i - groundX, p.height - 40, i - groundX - 10, p.height);
                 }
@@ -599,14 +537,14 @@
                 });
                 
                 conn.on('data', (data) => {
-                    // Status Update
+                    // HANDLE PING
+                    if (data.type === 'PING') {
+                        conn.send({ type: 'PONG', ts: data.ts });
+                    }
+                    // HANDLE STATUS
                     if (data.type === 'STATUS') {
                         document.getElementById('mobile-status').innerText = data.status;
                         document.getElementById('flap-btn').innerText = data.btn;
-                    }
-                    // Ping Pong for Latency
-                    if (data.type === 'PING') {
-                        conn.send({ type: 'PONG', time: data.time });
                     }
                 });
                 
@@ -638,50 +576,31 @@
          */
         class Bird {
             constructor(id, color, controlType, controlKey, connId, p) {
-                this.id = id;
-                this.color = color;
-                this.controlType = controlType;
-                this.controlKey = controlKey;
-                this.connId = connId;
-                this.connection = null; 
-                this.p = p; 
-                this.finalScore = 0;
+                this.id = id; this.color = color; this.controlType = controlType;
+                this.controlKey = controlKey; this.connId = connId;
+                this.connection = null; this.p = p; this.finalScore = 0;
                 this.reset();
             }
 
-            getName() {
-                return this.controlType === 'keyboard' ? `KEY ${this.controlKey}` : `MOBILE P${this.id}`;
-            }
+            getName() { return this.controlType === 'keyboard' ? `KEY ${this.controlKey}` : `MOBILE P${this.id}`; }
 
             reset() {
-                this.x = 100;
-                this.y = 300;
-                this.velocity = 0;
-                this.gravity = 0.5;
-                this.lift = -8;
-                this.radius = 12;
-                this.dead = false;
-                this.angle = 0;
-                this.isReady = false;
+                this.x = 100; this.y = 300; this.velocity = 0;
+                this.gravity = 0.5; this.lift = -8; this.radius = 12;
+                this.dead = false; this.angle = 0; this.isReady = false;
                 this.finalScore = 0;
             }
 
-            flap() {
-                this.velocity = this.lift;
-                this.angle = -25;
-            }
+            flap() { this.velocity = this.lift; this.angle = -25; }
 
             die(currentScore) {
                 if(this.dead) return;
-                this.dead = true;
-                this.finalScore = currentScore;
-                this.velocity = 0; 
+                this.dead = true; this.finalScore = currentScore; this.velocity = 0; 
                 if(this.connection) sendToMobile(this.connection, 'DEAD', 'X_X');
             }
 
             update() {
-                this.velocity += this.gravity;
-                this.y += this.velocity;
+                this.velocity += this.gravity; this.y += this.velocity;
                 if (this.velocity < 0) this.angle = -25;
                 else if (this.angle < 90) this.angle += 3;
             }
@@ -691,22 +610,14 @@
                 let by = this.y - this.radius + 4;
                 let bw = (this.radius * 2) - 8;
                 let bh = (this.radius * 2) - 8;
-
-                if (bx < pipe.x + pipe.w && bx + bw > pipe.x &&
-                    by < pipe.top && by + bh > 0) return true;
-                
-                if (bx < pipe.x + pipe.w && bx + bw > pipe.x &&
-                    by + bh > pipe.bottom && by < this.p.height) return true;
-                    
+                if (bx < pipe.x + pipe.w && bx + bw > pipe.x && by < pipe.top && by + bh > 0) return true;
+                if (bx < pipe.x + pipe.w && bx + bw > pipe.x && by + bh > pipe.bottom && by < this.p.height) return true;
                 return false;
             }
 
             render() {
-                this.p.push();
-                this.p.translate(this.x, this.y);
-                if (this.dead) this.p.rotate(this.p.radians(90));
-                else this.p.rotate(this.p.radians(this.angle));
-
+                this.p.push(); this.p.translate(this.x, this.y);
+                if (this.dead) this.p.rotate(this.p.radians(90)); else this.p.rotate(this.p.radians(this.angle));
                 this.p.stroke(0); this.p.strokeWeight(2); this.p.fill(this.color);
                 this.p.ellipse(0, 0, this.radius * 2.4, this.radius * 2);
                 this.p.fill(255); this.p.ellipse(6, -6, 10, 10);
@@ -716,10 +627,8 @@
                 this.p.pop();
 
                 if (GAME_STATE === 'READY' && this.isReady) {
-                    this.p.fill('#2ecc71'); this.p.noStroke();
-                    this.p.ellipse(this.x, this.y - 30, 10, 10);
+                    this.p.fill('#2ecc71'); this.p.noStroke(); this.p.ellipse(this.x, this.y - 30, 10, 10);
                 }
-
                 if (!this.dead) {
                     this.p.noStroke(); this.p.fill(255); this.p.textSize(10);
                     this.p.textAlign(this.p.CENTER);
@@ -731,21 +640,12 @@
 
         class Pipe {
             constructor(startX, p) {
-                this.x = startX;
-                this.p = p;
-                this.w = 60;
-                this.gap = 130;
-                this.speed = 3;
-                this.passed = false;
-                
-                let minPipe = 50;
-                let maxPipe = p.height - 40 - this.gap - minPipe;
+                this.x = startX; this.p = p; this.w = 60; this.gap = 130; this.speed = 3; this.passed = false;
+                let minPipe = 50; let maxPipe = p.height - 40 - this.gap - minPipe;
                 this.top = Math.random() * (maxPipe - minPipe) + minPipe;
                 this.bottom = this.top + this.gap;
             }
-
             update() { this.x -= this.speed; }
-
             render() {
                 this.p.stroke(0); this.p.strokeWeight(2); this.p.fill('#73bf2e');
                 this.p.rect(this.x, 0, this.w, this.top);
